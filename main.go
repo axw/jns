@@ -74,7 +74,7 @@ func (s *jujuNameServer) answer(q dns.Question) (dns.RR, error) {
 	}
 
 	var envName string
-	entityName := strings.TrimSuffix(q.Name, "."+zone)
+	entityName := strings.ToLower(strings.TrimSuffix(q.Name, "."+zone))
 	if i := strings.IndexRune(entityName, '.'); i >= 0 {
 		envName = entityName[i+1:]
 		entityName = entityName[:i]
@@ -93,6 +93,14 @@ func (s *jujuNameServer) answer(q dns.Question) (dns.RR, error) {
 	}
 	defer api.Close()
 	client := api.Client()
+
+	// If the entity name parses as a tag, extract the ID. This enables
+	// us to address "unit-mysql-0", where we couldn't otherwise, since
+	// slashes are not allowed in domain names. Similarly for container
+	// machines (e.g. to address "0/lxc/0", pass "machine-0-lxc-0").
+	if tag, err := names.ParseTag(entityName); err == nil {
+		entityName = tag.Id()
+	}
 
 	var addr string
 	if names.IsValidService(entityName) {
@@ -156,6 +164,36 @@ func shuffle(ss []string) {
 }
 
 func (s *jujuNameServer) openAPI(envName string) (api.Connection, error) {
+	if envName != "" {
+		// Domain names are case-insensitive, but environment
+		// names are not. We'll error if there are two names
+		// that match case-insensitively.
+		store, err := configstore.Default()
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		envNames, err := store.List()
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		var matches []string
+		for _, storeEnvName := range envNames {
+			if strings.ToLower(storeEnvName) == strings.ToLower(envName) {
+				matches = append(matches, storeEnvName)
+			}
+		}
+		if len(matches) == 0 {
+			return nil, errors.NotFoundf("environment %q", envName)
+		}
+		if len(matches) > 1 {
+			return nil, errors.Errorf(
+				"%q matches multiple environments: %q",
+				envName, matches,
+			)
+		}
+		envName = matches[0]
+	}
+
 	jar, err := cookiejar.New(&cookiejar.Options{
 		Filename: cookiejar.DefaultCookieFile(),
 	})
